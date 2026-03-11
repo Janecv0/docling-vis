@@ -14,11 +14,17 @@ Tiny local-first QA/review app for comparing source documents (PDF/PPTX) with Do
 - Two-pane review UI:
   - Left: source preview (PDF embed or PPTX fallback slide cards).
   - Right: Docling output preview (HTML / Markdown / JSON).
+  - Right preview is rendered in an internal scroll window.
+  - Source page/slide selection can auto-focus and scroll to matched content on the right (when JSON mapping is available).
+  - PPTX sync prioritizes slide-title matching before fallback text similarity.
+  - If slide/page metadata is missing, slide sync can fall back to text similarity against Docling block text.
+  - A synced text panel shows extracted block text for the currently selected PDF page or PPTX slide.
 - Top toolbar:
   - Multi-file uploader.
   - Local folder path loader.
   - Document selector.
   - View selector.
+  - `Synchronise slides` toggle to enable/disable slide-to-right-pane syncing.
   - Simple theme toggle and pane split slider.
 - Metadata pane:
   - Extracted blocks table (id, label/type, page, snippet, path).
@@ -26,8 +32,8 @@ Tiny local-first QA/review app for comparing source documents (PDF/PPTX) with Do
   - Select a block and inspect raw metadata.
   - Export selected block JSON.
 - Search:
-  - Search across the currently visible right-pane content.
-  - Shows highlighted snippets.
+  - Search panel provides clickable matches.
+  - Clicking a match can jump to the related slide/page and focus-scroll Markdown/HTML/JSON to the matched text.
 - Status panel:
   - Clearly shows loaded/missing assets per document.
 - Persistent recent folders:
@@ -99,9 +105,10 @@ streamlit run app.py
 
 - Streamlit cannot reliably render native PPTX visuals cross-platform without external tooling.
 - This app uses a Python-only fallback:
-  - Parses PPTX text with `python-pptx`.
-  - Generates slide-card images with Pillow for in-app preview.
-- This is reliable and local, but not full-fidelity slide rendering.
+  - Parses slide geometry with `python-pptx`.
+  - Draws a visual approximation (shape positions, text boxes, basic lines, tables, embedded images, and simple chart rendering) using Pillow.
+  - Includes a "Text outline" mode when you want simpler extraction.
+- This is more informative than plain text-only preview, but still not full-fidelity rendering.
 
 ## Deploy on Railway
 
@@ -125,7 +132,8 @@ Important for hosted usage:
 
 ## Known limitations
 
-- PPTX preview is text-first fallback, not pixel-perfect visual rendering.
+- PPTX preview is a visual fallback, not pixel-perfect native rendering.
+- PPTX animations, gradients, complex chart styling, and advanced effects are approximated.
 - HTML sanitization removes scripts and unsupported tags; complex interactive HTML will not behave the same as a browser.
 - Block-to-HTML exact visual highlight is approximate; fallback is focused snippet + metadata panel.
 - Folder scanning is non-recursive (current folder only).

@@ -4,3 +4,4 @@ python-pptx>=1.0.2
 Pillow>=10.3.0
 bleach>=6.2.0
 beautifulsoup4>=4.12.3
+Markdown>=3.7

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +17,7 @@ from loaders import (
     load_sample_document,
     merge_document_sets,
 )
-from parsers import blocks_to_dataframe, extract_blocks, filter_blocks
+from parsers import BlockRecord, blocks_to_dataframe, extract_blocks, filter_blocks
 from ui_components import (
     apply_theme_css,
     html_to_text,
@@ -25,6 +27,7 @@ from ui_components import (
     render_markdown_preview,
     render_pdf_preview,
     render_pptx_preview,
+    trigger_parent_center_scroll,
 )
 from utils import highlight_context, load_recent_folders, push_recent_folder, simple_text_search
 
@@ -42,6 +45,13 @@ def init_state() -> None:
         "theme_mode": "System",
         "view_mode": "HTML",
         "pane_split": 50,
+        "sync_slides": True,
+        "pdf_page_selector": 1,
+        "pptx_slide_selector": 1,
+        "pptx_scroll_ready": False,
+        "source_mode_selector": "PPTX",
+        "search_focus_text": "",
+        "pending_nav_slide": None,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -72,6 +82,134 @@ def doc_view_options(doc: DocumentAssets) -> list[str]:
     if doc.get("json"):
         options.append("JSON")
     return options
+
+
+def _extract_int(value: str | None) -> int | None:
+    if not value:
+        return None
+    match = re.search(r"\d+", str(value))
+    if not match:
+        return None
+    try:
+        return int(match.group(0))
+    except ValueError:
+        return None
+
+
+def _find_synced_blocks(
+    blocks: list[BlockRecord],
+    source_index: int | None,
+) -> tuple[list[BlockRecord], int | None]:
+    if source_index is None or not blocks:
+        return [], None
+    for target in (source_index, source_index - 1, source_index + 1):
+        if target <= 0:
+            continue
+        subset = [block for block in blocks if _extract_int(block.page) == target]
+        if subset:
+            return subset, target
+    return [], None
+
+
+def _normalize_text(value: str) -> str:
+    lowered = value.lower()
+    lowered = re.sub(r"[^\w\s]", " ", lowered)
+    lowered = re.sub(r"\s+", " ", lowered)
+    return lowered.strip()
+
+
+def _tokens(value: str, min_len: int = 4) -> set[str]:
+    return {token for token in _normalize_text(value).split() if len(token) >= min_len}
+
+
+def _slide_title_from_text(slide_text: str) -> str:
+    for line in slide_text.splitlines():
+        candidate = line.strip()
+        if len(candidate) >= 4:
+            return candidate[:220]
+    return ""
+
+
+def _find_title_synced_blocks(
+    blocks: list[BlockRecord],
+    slide_title: str,
+) -> tuple[list[BlockRecord], float]:
+    title_norm = _normalize_text(slide_title)
+    if len(title_norm) < 4:
+        return [], 0.0
+
+    scored: list[tuple[float, BlockRecord]] = []
+    for block in blocks:
+        candidate = (block.text or block.snippet or "").strip()
+        if not candidate:
+            continue
+        candidate_norm = _normalize_text(candidate)
+        if not candidate_norm:
+            continue
+
+        contains_bonus = 0.0
+        if title_norm in candidate_norm:
+            contains_bonus = 0.35
+        ratio = SequenceMatcher(None, title_norm, candidate_norm[: max(80, len(title_norm) * 2)]).ratio()
+        score = max(ratio + contains_bonus, ratio)
+        if score >= 0.38:
+            # Prefer heading/title-like blocks if label exists.
+            label = (block.label or "").lower()
+            if any(token in label for token in ("title", "heading", "header", "section")):
+                score += 0.15
+            scored.append((score, block))
+
+    if not scored:
+        return [], 0.0
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+    top_score, top_block = scored[0]
+    top_page = _extract_int(top_block.page)
+    if top_page is not None:
+        same_page = [block for block in blocks if _extract_int(block.page) == top_page]
+        if same_page:
+            return same_page[:80], top_score
+    return [top_block], top_score
+
+
+def _find_text_synced_blocks(
+    blocks: list[BlockRecord],
+    slide_text: str,
+) -> tuple[list[BlockRecord], float]:
+    normalized_slide = _normalize_text(slide_text)
+    if len(normalized_slide) < 20:
+        return [], 0.0
+
+    slide_tokens = _tokens(slide_text)
+    if not slide_tokens:
+        return [], 0.0
+
+    scored: list[tuple[float, BlockRecord]] = []
+    for block in blocks:
+        candidate = (block.text or block.snippet or "").strip()
+        if len(candidate) < 12:
+            continue
+        candidate_tokens = _tokens(candidate)
+        if not candidate_tokens:
+            continue
+
+        token_overlap = len(slide_tokens & candidate_tokens) / max(1, len(slide_tokens))
+        sequence_ratio = SequenceMatcher(None, normalized_slide[:900], _normalize_text(candidate)[:900]).ratio()
+        score = max(token_overlap, sequence_ratio)
+        if score >= 0.14:
+            scored.append((score, block))
+
+    if not scored:
+        return [], 0.0
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+    top_score, top_block = scored[0]
+    top_page = _extract_int(top_block.page)
+    if top_page is not None:
+        same_page = [block for block in blocks if _extract_int(block.page) == top_page]
+        if same_page:
+            return same_page[:80], top_score
+    return [top_block], top_score
 
 
 def main() -> None:
@@ -144,7 +282,7 @@ def main() -> None:
 
     controls = st.container()
     with controls:
-        ctl1, ctl2, ctl3 = st.columns([1.8, 1.1, 2.1])
+        ctl1, ctl2, ctl3 = st.columns([1.8, 1.0, 1.3])
         doc_keys = sorted(docs.keys())
         with ctl1:
             if not doc_keys:
@@ -166,7 +304,11 @@ def main() -> None:
                 index=["HTML", "Markdown", "JSON"].index(st.session_state.get("view_mode", "HTML")),
             )
         with ctl3:
-            search_query = st.text_input("Search across selected output", value="", placeholder="Type text to find...")
+            st.toggle(
+                "Synchronise slides",
+                key="sync_slides",
+                help="When enabled in PPTX mode, the right pane follows the selected slide using Docling JSON page mapping.",
+            )
 
     if not docs:
         st.info(
@@ -186,60 +328,186 @@ def main() -> None:
         if json_error and current_doc.get("json"):
             st.warning(json_error)
 
+    with st.expander("Search panel", expanded=False):
+        search_query = st.text_input(
+            "Search across selected output",
+            value=st.session_state.get("search_query", ""),
+            key="search_query",
+            placeholder="Type text to find...",
+        )
+        search_matches_container = st.container()
+        search_block_hits: list[BlockRecord] = []
+        if search_query.strip() and blocks:
+            search_block_hits = filter_blocks(blocks, query=search_query.strip())[:12]
+
     left_weight = int(st.session_state["pane_split"])
     left_col, right_col = st.columns([left_weight, 100 - left_weight], gap="large")
 
     right_plain_text = ""
+    source_mode_selected: str | None = None
+    source_focus_kind = ""
+    source_focus_index: int | None = None
+    source_slide_text = ""
+    slide_changed = False
 
     with left_col:
         st.subheader("Source preview")
+        st.markdown('<div id="source-preview-anchor"></div>', unsafe_allow_html=True)
         source_modes: list[str] = []
         if current_doc.get("pdf"):
             source_modes.append("PDF")
         if current_doc.get("pptx"):
             source_modes.append("PPTX")
+        pending_nav_slide = st.session_state.get("pending_nav_slide")
+        if pending_nav_slide is not None and "PPTX" in source_modes:
+            try:
+                pending_value = max(1, int(pending_nav_slide))
+                st.session_state["source_mode_selector"] = "PPTX"
+                st.session_state["pptx_slide_selector"] = pending_value
+            except (TypeError, ValueError):
+                pass
+            st.session_state["pending_nav_slide"] = None
         if not source_modes:
             st.info("No source file loaded for this document. Add a PDF or PPTX.")
         else:
-            source_mode = st.radio("Source mode", options=source_modes, horizontal=True)
+            if st.session_state.get("source_mode_selector") not in source_modes:
+                st.session_state["source_mode_selector"] = source_modes[0]
+            source_mode = str(st.session_state.get("source_mode_selector", source_modes[0]))
+            source_mode_selected = source_mode
             if source_mode == "PDF":
-                render_pdf_preview(current_doc.get("pdf"))  # type: ignore[arg-type]
+                selected_page = st.number_input(
+                    "PDF page",
+                    min_value=1,
+                    step=1,
+                    key="pdf_page_selector",
+                )
+                render_pdf_preview(current_doc.get("pdf"), page=int(selected_page))  # type: ignore[arg-type]
+                source_focus_kind = "page"
+                source_focus_index = int(selected_page)
             else:
-                render_pptx_preview(current_doc.get("pptx"))  # type: ignore[arg-type]
+                source_focus_kind = "slide"
+                source_focus_index, source_slide_text, slide_changed = render_pptx_preview(current_doc.get("pptx"))  # type: ignore[arg-type]
+                if slide_changed:
+                    if st.session_state.get("pptx_scroll_ready", False):
+                        trigger_parent_center_scroll("source-preview-anchor")
+                    else:
+                        st.session_state["pptx_scroll_ready"] = True
+            st.radio("Source mode", options=source_modes, horizontal=True, key="source_mode_selector")
+
+    sync_slides_enabled = bool(st.session_state.get("sync_slides", True))
+    apply_sync = sync_slides_enabled and source_mode_selected == "PPTX"
+
+    synced_blocks: list[BlockRecord] = []
+    synced_page_value: int | None = None
+    sync_method = ""
+    text_match_score = 0.0
+    title_match_score = 0.0
+    if apply_sync:
+        synced_blocks, synced_page_value = _find_synced_blocks(blocks, source_focus_index)
+        if synced_blocks:
+            sync_method = "page"
+        elif source_slide_text.strip():
+            slide_title = _slide_title_from_text(source_slide_text)
+            if slide_title:
+                synced_blocks, title_match_score = _find_title_synced_blocks(blocks, slide_title)
+                if synced_blocks:
+                    sync_method = "title"
+            if not synced_blocks:
+                synced_blocks, text_match_score = _find_text_synced_blocks(blocks, source_slide_text)
+                if synced_blocks:
+                    sync_method = "text"
+    synced_block = synced_blocks[0] if synced_blocks else None
+    focus_text = ""
+    if synced_block is not None:
+        focus_text = (synced_block.text or synced_block.snippet).strip()
+    elif apply_sync and source_mode_selected == "PPTX":
+        # Fallback when JSON page/block mapping is weak: use slide title/text directly.
+        slide_title = _slide_title_from_text(source_slide_text)
+        focus_text = slide_title or source_slide_text.strip()
+    search_focus_text = (st.session_state.get("search_focus_text") or "").strip()
+    if search_focus_text:
+        focus_text = search_focus_text
 
     with right_col:
         st.subheader("Docling output preview")
+        
         selected_view = st.session_state["view_mode"]
         available_views = doc_view_options(current_doc)
         if selected_view not in available_views and available_views:
             st.warning(f"{selected_view} view is unavailable; showing {available_views[0]} instead.")
             selected_view = available_views[0]
 
+        preview_height = 780
         if not available_views:
             st.info("No Docling outputs loaded (.html, .md, .json).")
         elif selected_view == "HTML":
             html_asset = current_doc.get("html")
             if html_asset:
-                raw_html = render_html_preview(html_asset)
+                raw_html = render_html_preview(html_asset, height=preview_height, focus_text=focus_text)
                 right_plain_text = html_to_text(raw_html)
         elif selected_view == "Markdown":
             md_asset = current_doc.get("md")
             if md_asset:
-                right_plain_text = render_markdown_preview(md_asset)
+                right_plain_text = render_markdown_preview(md_asset, height=preview_height, focus_text=focus_text)
         elif selected_view == "JSON":
             if json_obj is not None:
-                render_json_preview(json_obj)
-                right_plain_text = json.dumps(json_obj, ensure_ascii=False, indent=2)
+                right_plain_text = render_json_preview(json_obj, height=preview_height, focus_text=focus_text)
             else:
                 st.warning(json_error or "JSON is unavailable.")
 
-        if search_query.strip() and right_plain_text:
-            matches = simple_text_search(right_plain_text, search_query.strip(), max_hits=6)
-            with st.expander(f"Search matches ({len(matches)})", expanded=bool(matches)):
-                if not matches:
-                    st.write("No matches found in the currently visible output.")
-                for idx, snippet in enumerate(matches, start=1):
-                    st.markdown(f"{idx}. {snippet}", unsafe_allow_html=True)
+    with search_matches_container:
+        if search_query.strip() and search_block_hits:
+            st.caption(f"Search matches: {len(search_block_hits)}")
+            for idx, hit in enumerate(search_block_hits, start=1):
+                label = (
+                    f"{idx}. p{hit.page or '-'} | {hit.label or 'block'} | {hit.snippet}"
+                )
+                if st.button(label, key=f"search_hit_{idx}", use_container_width=True):
+                    target_page = _extract_int(hit.page)
+                    if target_page is not None and current_doc.get("pptx"):
+                        st.session_state["pending_nav_slide"] = target_page
+                    if current_doc.get("md"):
+                        st.session_state["view_mode"] = "Markdown"
+                    st.session_state["search_focus_text"] = (hit.text or hit.snippet or "").strip()
+                    st.rerun()
+        elif search_query.strip() and right_plain_text:
+            matches = simple_text_search(right_plain_text, search_query.strip(), max_hits=8)
+            st.caption(f"Search matches: {len(matches)}")
+            if not matches:
+                st.write("No matches found in the currently visible output.")
+            for idx, snippet in enumerate(matches, start=1):
+                st.markdown(f"{idx}. {snippet}", unsafe_allow_html=True)
+        elif search_query.strip():
+            st.caption("Search matches: 0")
+            st.write("No searchable content in the current right view.")
+
+    if search_focus_text:
+        st.session_state["search_focus_text"] = ""
+
+    if apply_sync and source_focus_index is not None and blocks:
+        if synced_block is not None:
+            if sync_method == "page":
+                st.caption(
+                    f"Synced to {source_focus_kind} {source_focus_index} via block "
+                    f"`{synced_block.block_id}` (page={synced_page_value or synced_block.page or '-'})"
+                )
+            elif sync_method == "title":
+                st.caption(
+                    f"Synced to {source_focus_kind} {source_focus_index} by slide title match "
+                    f"(score={title_match_score:.2f}) using block `{synced_block.block_id}` "
+                    f"(page={synced_block.page or '-'})"
+                )
+            elif sync_method == "text":
+                st.caption(
+                    f"Synced to {source_focus_kind} {source_focus_index} by text similarity "
+                    f"(score={text_match_score:.2f}) using block `{synced_block.block_id}` "
+                    f"(page={synced_block.page or '-'})"
+                )
+        else:
+            st.caption(
+                f"No JSON block matched {source_focus_kind} {source_focus_index}; "
+                "using slide title/text fallback for right-side focus."
+            )
 
     st.subheader("Metadata and block inspection")
     meta_col, detail_col = st.columns([1.6, 1.0], gap="large")
