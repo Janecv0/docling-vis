@@ -509,85 +509,84 @@ def main() -> None:
                 "using slide title/text fallback for right-side focus."
             )
 
-    st.subheader("Metadata and block inspection")
-    meta_col, detail_col = st.columns([1.6, 1.0], gap="large")
+    with st.expander("Metadata and block inspection", expanded=False):
+        meta_col, detail_col = st.columns([1.6, 1.0], gap="large")
 
-    selected_block = None
-    with meta_col:
-        if current_doc.get("json") is None:
-            st.info("No JSON loaded. Block extraction and metadata table require Docling JSON.")
-        elif json_error:
-            st.error(json_error)
-        elif not blocks:
-            st.info("No blocks detected in JSON. You can still inspect the raw JSON in right pane.")
-        else:
-            labels = sorted({block.label for block in blocks if block.label})
-            pages = sorted({block.page for block in blocks if block.page})
-            f1, f2, f3 = st.columns([2.0, 1.5, 1.5])
-            with f1:
-                block_query = st.text_input("Filter blocks", placeholder="id, label, text...")
-            with f2:
-                label_filter = st.multiselect("Label/type", options=labels)
-            with f3:
-                page_filter = st.multiselect("Page", options=pages)
+        selected_block = None
+        with meta_col:
+            if current_doc.get("json") is None:
+                st.info("No JSON loaded. Block extraction and metadata table require Docling JSON.")
+            elif json_error:
+                st.error(json_error)
+            elif not blocks:
+                st.info("No blocks detected in JSON. You can still inspect the raw JSON in right pane.")
+            else:
+                labels = sorted({block.label for block in blocks if block.label})
+                pages = sorted({block.page for block in blocks if block.page})
+                f1, f2, f3 = st.columns([2.0, 1.5, 1.5])
+                with f1:
+                    block_query = st.text_input("Filter blocks", placeholder="id, label, text...")
+                with f2:
+                    label_filter = st.multiselect("Label/type", options=labels)
+                with f3:
+                    page_filter = st.multiselect("Page", options=pages)
 
-            filtered = filter_blocks(blocks, query=block_query, labels=label_filter, pages=page_filter)
-            st.caption(f"Showing {len(filtered)} of {len(blocks)} extracted blocks.")
-            st.dataframe(blocks_to_dataframe(filtered), hide_index=True, use_container_width=True, height=280)
+                filtered = filter_blocks(blocks, query=block_query, labels=label_filter, pages=page_filter)
+                st.caption(f"Showing {len(filtered)} of {len(blocks)} extracted blocks.")
+                st.dataframe(blocks_to_dataframe(filtered), hide_index=True, use_container_width=True, height=280)
 
-            if filtered:
-                option_ids = list(range(len(filtered)))
-                selected_idx = st.selectbox(
-                    "Select block",
-                    options=option_ids,
-                    format_func=lambda idx: (
-                        f"{filtered[idx].block_id} | p{filtered[idx].page or '-'} | {filtered[idx].snippet}"
-                    ),
+                if filtered:
+                    option_ids = list(range(len(filtered)))
+                    selected_idx = st.selectbox(
+                        "Select block",
+                        options=option_ids,
+                        format_func=lambda idx: (
+                            f"{filtered[idx].block_id} | p{filtered[idx].page or '-'} | {filtered[idx].snippet}"
+                        ),
+                    )
+                    selected_block = filtered[selected_idx]
+
+        with detail_col:
+            st.markdown('<div class="review-card">', unsafe_allow_html=True)
+            st.markdown("**Detail panel**")
+            if selected_block is None:
+                st.write("Select a block to inspect metadata and focused snippet.")
+            else:
+                st.json(
+                    {
+                        "block_id": selected_block.block_id,
+                        "label": selected_block.label,
+                        "page": selected_block.page,
+                        "path": selected_block.path,
+                        "bbox": selected_block.bbox,
+                        "snippet": selected_block.snippet,
+                    }
                 )
-                selected_block = filtered[selected_idx]
+                st.download_button(
+                    "Export selected block JSON",
+                    data=json.dumps(selected_block.raw, ensure_ascii=False, indent=2),
+                    file_name=f"{selected_block.block_id}.json",
+                    mime="application/json",
+                    use_container_width=True,
+                )
+                st.markdown("**Raw block JSON**")
+                st.json(selected_block.raw, expanded=False)
 
-    with detail_col:
-        st.markdown('<div class="review-card">', unsafe_allow_html=True)
-        st.markdown("**Detail panel**")
-        if selected_block is None:
-            st.write("Select a block to inspect metadata and focused snippet.")
-        else:
-            st.json(
-                {
-                    "block_id": selected_block.block_id,
-                    "label": selected_block.label,
-                    "page": selected_block.page,
-                    "path": selected_block.path,
-                    "bbox": selected_block.bbox,
-                    "snippet": selected_block.snippet,
-                }
-            )
-            st.download_button(
-                "Export selected block JSON",
-                data=json.dumps(selected_block.raw, ensure_ascii=False, indent=2),
-                file_name=f"{selected_block.block_id}.json",
-                mime="application/json",
-                use_container_width=True,
-            )
-            st.markdown("**Raw block JSON**")
-            st.json(selected_block.raw, expanded=False)
-
-            needle = (selected_block.text or selected_block.snippet or selected_block.block_id).strip()
-            if needle and right_plain_text:
-                focused = highlight_context(right_plain_text, needle[:120], context_chars=160)
-                if not focused and len(needle) > 24:
-                    focused = highlight_context(right_plain_text, needle[:24], context_chars=160)
-                if focused:
-                    st.markdown("**Focused text snippet (fallback highlight)**")
-                    st.markdown(focused, unsafe_allow_html=True)
-                else:
-                    st.info("No direct text match found in the currently visible right-pane content.")
-            elif not right_plain_text:
-                st.info("Focused snippet appears after loading HTML/Markdown/JSON content on the right.")
-        st.markdown("</div>", unsafe_allow_html=True)
+                needle = (selected_block.text or selected_block.snippet or selected_block.block_id).strip()
+                if needle and right_plain_text:
+                    focused = highlight_context(right_plain_text, needle[:120], context_chars=160)
+                    if not focused and len(needle) > 24:
+                        focused = highlight_context(right_plain_text, needle[:24], context_chars=160)
+                    if focused:
+                        st.markdown("**Focused text snippet (fallback highlight)**")
+                        st.markdown(focused, unsafe_allow_html=True)
+                    else:
+                        st.info("No direct text match found in the currently visible right-pane content.")
+                elif not right_plain_text:
+                    st.info("Focused snippet appears after loading HTML/Markdown/JSON content on the right.")
+            st.markdown("</div>", unsafe_allow_html=True)
 
 
 if __name__ == "__main__":
     main()
-
 

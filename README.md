@@ -103,12 +103,16 @@ streamlit run app.py
 
 ## PPTX preview strategy
 
-- Streamlit cannot reliably render native PPTX visuals cross-platform without external tooling.
-- This app uses a Python-only fallback:
-  - Parses slide geometry with `python-pptx`.
-  - Draws a visual approximation (shape positions, text boxes, basic lines, tables, embedded images, and simple chart rendering) using Pillow.
-  - Includes a "Text outline" mode when you want simpler extraction.
-- This is more informative than plain text-only preview, but still not full-fidelity rendering.
+- Renderer options in the app:
+  - `Native PowerPoint (COM)` (Windows + desktop Microsoft PowerPoint installed):
+    - Uses COM automation (`pywin32`) to export each slide to PNG.
+    - Fidelity matches PowerPoint's own rendering output.
+    - Keeps a direct slide index mapping (`slide N` -> exported image `N`) for sync logic.
+  - `Python fallback` (cross-platform):
+    - Parses slide geometry with `python-pptx`.
+    - Draws a visual approximation (shape positions, text boxes, basic lines, tables, embedded images, and simple chart rendering) using Pillow.
+    - Includes a "Text outline" mode when you want simpler extraction.
+- If COM is unavailable, the app automatically falls back to Python rendering.
 
 ## Deploy on Railway
 
@@ -129,11 +133,13 @@ Important for hosted usage:
 
 - The folder-path loader reads the server filesystem, not your laptop filesystem.
 - For normal review usage on Railway, upload files in the UI.
+- Railway Linux environments do not support PowerPoint COM automation, so PPTX rendering uses Python fallback there.
 
 ## Known limitations
 
-- PPTX preview is a visual fallback, not pixel-perfect native rendering.
-- PPTX animations, gradients, complex chart styling, and advanced effects are approximated.
+- Native PPTX fidelity requires Windows + installed desktop Microsoft PowerPoint + `pywin32`.
+- COM rendering is unavailable on Linux/macOS (including Railway), where Python fallback is used.
+- In Python fallback mode, PPTX animations, gradients, complex chart styling, and advanced effects are approximated.
 - HTML sanitization removes scripts and unsupported tags; complex interactive HTML will not behave the same as a browser.
 - Block-to-HTML exact visual highlight is approximate; fallback is focused snippet + metadata panel.
 - Folder scanning is non-recursive (current folder only).

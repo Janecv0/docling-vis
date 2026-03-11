@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import html as html_lib
 import io
 import json
+import os
 import re
+import tempfile
 import textwrap
+from pathlib import Path
 from typing import Any
 
 import bleach
@@ -555,6 +559,119 @@ def _render_slide_visual_cached(data: bytes, slide_index: int, canvas_w: int = 1
     return buffer.getvalue()
 
 
+@st.cache_data(show_spinner=False)
+def _detect_powerpoint_com() -> tuple[bool, str]:
+    if os.name != "nt":
+        return False, "Native COM renderer requires Windows."
+    try:
+        import pythoncom  # type: ignore
+        import win32com.client  # type: ignore # noqa: F401
+
+        pythoncom.CoInitialize()
+        app = win32com.client.DispatchEx("PowerPoint.Application")
+        app.Quit()
+        pythoncom.CoUninitialize()
+        return True, ""
+    except Exception as exc:
+        return False, f"PowerPoint COM unavailable: {exc}"
+
+
+def _sorted_slide_images(slides_dir: Path) -> list[Path]:
+    candidates = [path for path in slides_dir.iterdir() if path.is_file() and path.suffix.lower() in (".png", ".jpg", ".jpeg")]
+
+    def sort_key(path: Path) -> tuple[int, str]:
+        match = re.search(r"(\d+)", path.stem)
+        if match:
+            return int(match.group(1)), path.name.lower()
+        return 10**9, path.name.lower()
+
+    return sorted(candidates, key=sort_key)
+
+
+def _fit_export_size(
+    slide_w: int,
+    slide_h: int,
+    max_width: int = 1920,
+    max_height: int = 1920,
+) -> tuple[int, int]:
+    if slide_w <= 0 or slide_h <= 0:
+        return max_width, int(max_width * 9 / 16)
+    ratio = slide_w / slide_h
+    width = max_width
+    height = int(round(width / ratio))
+    if height > max_height:
+        height = max_height
+        width = int(round(height * ratio))
+    return max(320, width), max(200, height)
+
+
+@st.cache_data(show_spinner=False)
+def _render_pptx_via_com_cached(data: bytes, width: int = 1920, height: int = 1080) -> tuple[list[bytes], str | None]:
+    if os.name != "nt":
+        return [], "Native COM renderer is only available on Windows."
+    try:
+        import pythoncom  # type: ignore
+        import win32com.client  # type: ignore
+    except Exception as exc:
+        return [], f"Missing pywin32/COM support: {exc}"
+
+    ppt_hash = hashlib.sha256(data).hexdigest()[:16]
+    with tempfile.TemporaryDirectory(prefix=f"pptx_com_{ppt_hash}_") as temp_dir:
+        temp_path = Path(temp_dir)
+        pptx_path = temp_path / "input.pptx"
+        slides_dir = temp_path / "slides"
+        slides_dir.mkdir(parents=True, exist_ok=True)
+        pptx_path.write_bytes(data)
+
+        app = None
+        presentation = None
+        try:
+            pythoncom.CoInitialize()
+            app = win32com.client.DispatchEx("PowerPoint.Application")
+            # Some Office setups disallow hidden automation. Try hidden first, then visible fallback.
+            try:
+                app.Visible = 0
+            except Exception:
+                try:
+                    app.Visible = 1
+                except Exception:
+                    pass
+
+            try:
+                presentation = app.Presentations.Open(str(pptx_path), WithWindow=False, ReadOnly=True)
+            except Exception:
+                # Fallback when hidden window automation is blocked by policy.
+                presentation = app.Presentations.Open(str(pptx_path), WithWindow=True, ReadOnly=True)
+            presentation.Export(str(slides_dir), "PNG", width, height)
+        except Exception as exc:
+            return [], f"PowerPoint COM export failed: {exc}"
+        finally:
+            try:
+                if presentation is not None:
+                    presentation.Close()
+            except Exception:
+                pass
+            try:
+                if app is not None:
+                    app.Quit()
+            except Exception:
+                pass
+            try:
+                pythoncom.CoUninitialize()
+            except Exception:
+                pass
+
+        images: list[bytes] = []
+        for image_path in _sorted_slide_images(slides_dir):
+            try:
+                images.append(image_path.read_bytes())
+            except OSError:
+                continue
+        if not images:
+            return [], "PowerPoint COM export produced no slide images."
+        return images, None
+
+
 def render_pptx_preview(asset: AssetRef) -> tuple[int, str, bool]:
     data = asset.read_bytes()
     if not data:
@@ -571,6 +688,16 @@ def render_pptx_preview(asset: AssetRef) -> tuple[int, str, bool]:
         st.info("PPTX has no slides.")
         return 1, "", False
 
+    com_available, com_reason = _detect_powerpoint_com()
+    renderer_options = ["Python fallback"]
+    if com_available:
+        renderer_options.insert(0, "Native PowerPoint (COM)")
+
+    selected_renderer = str(st.session_state.get("pptx_renderer_mode", renderer_options[0]))
+    if selected_renderer not in renderer_options:
+        selected_renderer = renderer_options[0]
+    st.session_state["pptx_renderer_mode"] = selected_renderer
+
     preview_mode = str(st.session_state.get("pptx_preview_mode", "Visual fallback"))
     if preview_mode not in ("Visual fallback", "Text outline"):
         preview_mode = "Visual fallback"
@@ -582,15 +709,29 @@ def render_pptx_preview(asset: AssetRef) -> tuple[int, str, bool]:
     slide_changed = False
     selected_slide = current_slide
     slide = presentation.slides[selected_slide - 1]
+    slide_w = int(presentation.slide_width)
+    slide_h = int(presentation.slide_height)
+    export_width, export_height = _fit_export_size(slide_w=slide_w, slide_h=slide_h, max_width=1920, max_height=1920)
     title, lines = _extract_slide_text(slide)
-    if preview_mode == "Visual fallback":
+    if selected_renderer == "Native PowerPoint (COM)":
+        com_images, com_error = _render_pptx_via_com_cached(data, width=export_width, height=export_height)
+        if com_images and 0 <= selected_slide - 1 < len(com_images):
+            st.image(com_images[selected_slide - 1], use_container_width=True)
+        else:
+            if com_error:
+                st.warning(f"Native renderer unavailable: {com_error}")
+            rendered_png = _render_slide_visual_cached(data, selected_slide - 1, canvas_w=1400)
+            st.image(rendered_png, use_container_width=True)
+    elif preview_mode == "Visual fallback":
         rendered_png = _render_slide_visual_cached(data, selected_slide - 1, canvas_w=1400)
         st.image(rendered_png, use_container_width=True)
     else:
-        draw = Image.new("RGB", (1280, 720), color=(248, 250, 252))
+        card_w = 1280
+        card_h = max(520, int(card_w * slide_h / max(1, slide_w)))
+        draw = Image.new("RGB", (card_w, card_h), color=(248, 250, 252))
         card = ImageDraw.Draw(draw)
         font = _load_font(16)
-        card.rectangle((22, 22, 1258, 698), outline=(30, 64, 175), width=3)
+        card.rectangle((22, 22, card_w - 22, card_h - 22), outline=(30, 64, 175), width=3)
         card.text((40, 36), f"Slide {selected_slide}", fill=(30, 41, 59), font=font)
         card.text((40, 72), title or "(No title detected)", fill=(15, 23, 42), font=font)
         y = 110
@@ -600,13 +741,20 @@ def render_pptx_preview(asset: AssetRef) -> tuple[int, str, bool]:
         for line in wrapped[:24]:
             card.text((48, y), f"- {line}", fill=(51, 65, 85), font=_load_font(14))
             y += 22
-            if y > 680:
+            if y > card_h - 40:
                 break
         st.image(draw, use_container_width=True)
-    st.caption(
-        "PPTX preview uses a Python-only visual fallback (layout-aware shapes + text + embedded images). "
-        "Some advanced effects are approximated."
-    )
+    if selected_renderer == "Native PowerPoint (COM)":
+        st.caption("PPTX preview uses Microsoft PowerPoint COM export (Windows only) for high-fidelity slide rendering.")
+    elif com_available:
+        st.caption(
+            "PPTX preview uses Python fallback renderer. Switch to Native PowerPoint (COM) for highest fidelity on Windows."
+        )
+    else:
+        st.caption(
+            "PPTX preview uses Python fallback renderer (layout-aware shapes + text + embedded images). "
+            "Native COM renderer is unavailable."
+        )
 
     prev_col, label_col, next_col = st.columns([0.8, 2.4, 0.8])
     with prev_col:
@@ -625,7 +773,14 @@ def render_pptx_preview(asset: AssetRef) -> tuple[int, str, bool]:
         st.session_state["pptx_slide_selector"] = target_slide
         slide_changed = True
         st.rerun()
-        
+
+    st.radio(
+        "PPTX renderer",
+        options=renderer_options,
+        horizontal=True,
+        key="pptx_renderer_mode",
+        help=com_reason if (not com_available and com_reason) else "Choose COM renderer for PowerPoint-fidelity output.",
+    )
     st.radio(
         "PPTX mode",
         options=["Visual fallback", "Text outline"],
@@ -830,4 +985,3 @@ def render_json_preview(json_obj: Any, height: int = 760, focus_text: str = "") 
             break
     _render_scrollable_html(f"<pre>{escaped}</pre>", height=height, auto_scroll=found)
     return pretty
-
