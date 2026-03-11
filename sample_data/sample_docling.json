@@ -1,0 +1,87 @@
+{
+  "document": {
+    "id": "sample-contract-001",
+    "title": "Sample Service Agreement",
+    "meta": {
+      "source_name": "sample_contract.pdf"
+    }
+  },
+  "pages": [
+    {
+      "page_no": 1,
+      "items": [
+        {
+          "id": "b-001",
+          "label": "title",
+          "text": "Service Agreement",
+          "bbox": [
+            68,
+            74,
+            422,
+            118
+          ]
+        },
+        {
+          "id": "b-002",
+          "type": "paragraph",
+          "page": 1,
+          "content": "This agreement is made between Example Client and Example Vendor for analytics services.",
+          "prov": {
+            "page_number": 1,
+            "bbox": [
+              72,
+              160,
+              540,
+              255
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "page_no": 2,
+      "sections": [
+        {
+          "block_id": "b-101",
+          "kind": "heading",
+          "value": "Commercial Terms",
+          "metadata": {
+            "page_num": 2
+          }
+        },
+        {
+          "uid": "b-102",
+          "category": "table_row",
+          "text": "Monthly fee | EUR 3,000",
+          "provenance": {
+            "source_page": {
+              "page_no": 2
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "blocks": [
+    {
+      "id": "b-201",
+      "type": "bullet_item",
+      "page_index": 2,
+      "text": "Invoices are due within 14 days."
+    },
+    {
+      "self_ref": "b-202",
+      "role": "footer",
+      "raw_text": "Confidential - internal use only",
+      "location": {
+        "page": 3,
+        "coordinates": [
+          50,
+          760,
+          540,
+          788
+        ]
+      }
+    }
+  ]
+}
