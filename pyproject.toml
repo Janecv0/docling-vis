@@ -12,5 +12,6 @@ dependencies = [
   "bleach>=6.2.0",
   "beautifulsoup4>=4.12.3",
   "Markdown>=3.7",
+  "pypdfium2>=4.30.0",
   "pywin32>=306; platform_system == 'Windows'",
 ]

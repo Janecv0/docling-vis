@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import hashlib
 import html as html_lib
 import io
@@ -19,6 +18,10 @@ import streamlit as st
 import streamlit.components.v1 as components
 from bs4 import BeautifulSoup, NavigableString
 from PIL import Image, ImageDraw, ImageFont, UnidentifiedImageError
+try:
+    import pypdfium2 as pdfium
+except ImportError:  # pragma: no cover - optional dependency for PDF preview
+    pdfium = None
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 
@@ -136,7 +139,7 @@ def render_asset_status_panel(doc: DocumentAssets) -> None:
                 "name": asset.name if asset else "",
             }
         )
-    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
 
 
 def render_pdf_preview(asset: AssetRef, height: int = 760, page: int = 1) -> None:
@@ -144,14 +147,65 @@ def render_pdf_preview(asset: AssetRef, height: int = 760, page: int = 1) -> Non
     if not data:
         st.warning("PDF data is missing or unreadable.")
         return
-    encoded = base64.b64encode(data).decode("utf-8")
     page_anchor = max(1, int(page))
-    src = f"data:application/pdf;base64,{encoded}#page={page_anchor}&view=FitH"
-    iframe_html = (
-        f'<iframe src="{src}" '
-        f'width="100%" height="{height}" type="application/pdf"></iframe>'
+    rendered = False
+    render_error = ""
+    if pdfium is not None:
+        pdf = None
+        pdf_page = None
+        bitmap = None
+        try:
+            pdf = pdfium.PdfDocument(data)
+            page_index = min(max(0, page_anchor - 1), len(pdf) - 1)
+            pdf_page = pdf[page_index]
+            bitmap = pdf_page.render(scale=1.5)
+            with st.container(height=height, border=True):
+                st.image(bitmap.to_pil(), width="stretch")
+            rendered = True
+        except Exception as exc:
+            render_error = str(exc)
+            rendered = False
+        finally:
+            for obj in (bitmap, pdf_page, pdf):
+                if obj is not None and hasattr(obj, "close"):
+                    try:
+                        obj.close()
+                    except Exception:
+                        pass
+    if not rendered:
+        if pdfium is None:
+            st.warning("PDF preview dependency is missing (`pypdfium2`). Use download for now.")
+        else:
+            st.warning("PDF preview rendering failed. Use download for now.")
+            if render_error:
+                st.caption(f"Render error: {render_error}")
+    st.download_button(
+        "Download PDF",
+        data=data,
+        file_name=asset.name or "document.pdf",
+        mime="application/pdf",
+        width="content",
     )
-    components.html(iframe_html, height=height + 10, scrolling=True)
+
+
+def get_pdf_page_count(asset: AssetRef) -> int | None:
+    if pdfium is None:
+        return None
+    data = asset.read_bytes()
+    if not data:
+        return None
+    pdf = None
+    try:
+        pdf = pdfium.PdfDocument(data)
+        return int(len(pdf))
+    except Exception:
+        return None
+    finally:
+        if pdf is not None and hasattr(pdf, "close"):
+            try:
+                pdf.close()
+            except Exception:
+                pass
 
 
 def _extract_slide_text(slide: Any) -> tuple[str, list[str]]:
@@ -716,15 +770,15 @@ def render_pptx_preview(asset: AssetRef) -> tuple[int, str, bool]:
     if selected_renderer == "Native PowerPoint (COM)":
         com_images, com_error = _render_pptx_via_com_cached(data, width=export_width, height=export_height)
         if com_images and 0 <= selected_slide - 1 < len(com_images):
-            st.image(com_images[selected_slide - 1], use_container_width=True)
+            st.image(com_images[selected_slide - 1], width="stretch")
         else:
             if com_error:
                 st.warning(f"Native renderer unavailable: {com_error}")
             rendered_png = _render_slide_visual_cached(data, selected_slide - 1, canvas_w=1400)
-            st.image(rendered_png, use_container_width=True)
+            st.image(rendered_png, width="stretch")
     elif preview_mode == "Visual fallback":
         rendered_png = _render_slide_visual_cached(data, selected_slide - 1, canvas_w=1400)
-        st.image(rendered_png, use_container_width=True)
+        st.image(rendered_png, width="stretch")
     else:
         card_w = 1280
         card_h = max(520, int(card_w * slide_h / max(1, slide_w)))
@@ -743,7 +797,7 @@ def render_pptx_preview(asset: AssetRef) -> tuple[int, str, bool]:
             y += 22
             if y > card_h - 40:
                 break
-        st.image(draw, use_container_width=True)
+        st.image(draw, width="stretch")
     if selected_renderer == "Native PowerPoint (COM)":
         st.caption("PPTX preview uses Microsoft PowerPoint COM export (Windows only) for high-fidelity slide rendering.")
     elif com_available:
@@ -758,11 +812,11 @@ def render_pptx_preview(asset: AssetRef) -> tuple[int, str, bool]:
 
     prev_col, label_col, next_col = st.columns([0.8, 2.4, 0.8])
     with prev_col:
-        prev_clicked = st.button("<", key="pptx_prev_slide", use_container_width=True)
+        prev_clicked = st.button("<", key="pptx_prev_slide", width="stretch")
     with label_col:
         st.markdown(f"**Slide {current_slide} / {slide_count}**")
     with next_col:
-        next_clicked = st.button(">", key="pptx_next_slide", use_container_width=True)
+        next_clicked = st.button(">", key="pptx_next_slide", width="stretch")
 
     target_slide = current_slide
     if prev_clicked and current_slide > 1:
@@ -800,13 +854,23 @@ def render_pptx_preview(asset: AssetRef) -> tuple[int, str, bool]:
 
 
 def sanitize_html(raw_html: str) -> str:
+    content_html = _extract_content_html(raw_html)
     return bleach.clean(
-        raw_html,
+        content_html,
         tags=ALLOWED_HTML_TAGS,
         attributes=ALLOWED_HTML_ATTRS,
         protocols=["http", "https", "mailto", "data"],
         strip=True,
     )
+
+
+def _extract_content_html(raw_html: str) -> str:
+    soup = BeautifulSoup(raw_html, "html.parser")
+    for tag in soup.find_all(["script", "style", "noscript", "template", "title", "meta", "link", "head"]):
+        tag.decompose()
+    if soup.body is not None:
+        return "".join(str(node) for node in soup.body.contents)
+    return str(soup)
 
 
 def html_to_text(raw_html: str) -> str:
@@ -957,7 +1021,7 @@ def render_html_preview(asset: AssetRef, height: int = 760, focus_text: str = ""
     safe_html = sanitize_html(raw_html)
     focused_html, found = _inject_focus_mark(safe_html, focus_text=focus_text)
     _render_scrollable_html(focused_html, height=height, auto_scroll=found)
-    return raw_html
+    return _extract_content_html(raw_html)
 
 
 def render_markdown_preview(asset: AssetRef, height: int = 760, focus_text: str = "") -> str:

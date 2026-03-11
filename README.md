@@ -61,36 +61,16 @@ docling-vis/
 
 ## Setup and run
 
-1. Create virtual environment:
+1. Install dependencies with `uv`:
 
 ```bash
-python -m venv .venv
+uv sync
 ```
 
-2. Activate:
-
-Windows (PowerShell):
-
-```powershell
-.venv\Scripts\Activate.ps1
-```
-
-macOS/Linux:
+2. Run app:
 
 ```bash
-source .venv/bin/activate
-```
-
-3. Install dependencies:
-
-```bash
-pip install -r requirements.txt
-```
-
-4. Run app:
-
-```bash
-streamlit run app.py
+uv run python -m streamlit run app.py
 ```
 
 ## How document matching works
@@ -153,4 +133,3 @@ Important for hosted usage:
 - Inline diff mode between Markdown and HTML text.
 - Persist full app state per document (selected view, filters, selected block).
 - Optional plugin parser adapters for known Docling schema variants.
-

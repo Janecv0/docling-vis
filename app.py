@@ -20,6 +20,7 @@ from loaders import (
 from parsers import BlockRecord, blocks_to_dataframe, extract_blocks, filter_blocks
 from ui_components import (
     apply_theme_css,
+    get_pdf_page_count,
     html_to_text,
     render_asset_status_panel,
     render_html_preview,
@@ -52,6 +53,7 @@ def init_state() -> None:
         "source_mode_selector": "PPTX",
         "search_focus_text": "",
         "pending_nav_slide": None,
+        "uploader_nonce": 0,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -71,6 +73,18 @@ def load_folder(path_str: str) -> None:
     st.session_state["folder_path"] = str(folder)
     if docs:
         st.session_state["recent_folders"] = push_recent_folder(str(folder))
+
+
+def clear_loaded_documents() -> None:
+    st.session_state["folder_docs"] = {}
+    st.session_state["folder_warnings"] = []
+    st.session_state["sample_docs"] = {}
+    st.session_state["folder_path"] = ""
+    st.session_state["selected_doc_key"] = ""
+    st.session_state["pending_nav_slide"] = None
+    st.session_state["search_focus_text"] = ""
+    st.session_state["search_query"] = ""
+    st.session_state["uploader_nonce"] = int(st.session_state.get("uploader_nonce", 0)) + 1
 
 
 def doc_view_options(doc: DocumentAssets) -> list[str]:
@@ -232,12 +246,17 @@ def main() -> None:
     with top:
         row1_col1, row1_col2, row1_col3 = st.columns([2.8, 2.2, 1.0])
         with row1_col1:
+            upload_key = f"upload_files_{int(st.session_state.get('uploader_nonce', 0))}"
             uploaded_files = st.file_uploader(
                 "Upload files (.pdf, .pptx, .html, .md, .json)",
                 type=["pdf", "pptx", "html", "htm", "md", "markdown", "json"],
                 accept_multiple_files=True,
                 help="You can upload source file(s) and Docling outputs together.",
+                key=upload_key,
             )
+            if st.button("Remove all files", width="content", help="Clear uploads and loaded folder/sample docs."):
+                clear_loaded_documents()
+                st.rerun()
         with row1_col2:
             st.session_state["folder_path"] = st.text_input(
                 "Local folder path",
@@ -246,10 +265,10 @@ def main() -> None:
             )
             folder_btn_col, sample_btn_col = st.columns(2)
             with folder_btn_col:
-                if st.button("Load folder", use_container_width=True):
+                if st.button("Load folder", width="stretch"):
                     load_folder(st.session_state["folder_path"])
             with sample_btn_col:
-                if st.button("Load sample JSON", use_container_width=True):
+                if st.button("Load sample JSON", width="stretch"):
                     sample_path = Path("sample_data") / "sample_docling.json"
                     st.session_state["sample_docs"] = load_sample_document(sample_path)
 
@@ -305,9 +324,9 @@ def main() -> None:
             )
         with ctl3:
             st.toggle(
-                "Synchronise slides",
+                "Synchronise pages/slides",
                 key="sync_slides",
-                help="When enabled in PPTX mode, the right pane follows the selected slide using Docling JSON page mapping.",
+                help="When enabled, the right pane follows the selected PDF page or PPTX slide using Docling JSON page mapping.",
             )
 
     if not docs:
@@ -349,6 +368,7 @@ def main() -> None:
     source_focus_index: int | None = None
     source_slide_text = ""
     slide_changed = False
+    preview_height = 620
 
     with left_col:
         st.subheader("Source preview")
@@ -375,15 +395,35 @@ def main() -> None:
             source_mode = str(st.session_state.get("source_mode_selector", source_modes[0]))
             source_mode_selected = source_mode
             if source_mode == "PDF":
-                selected_page = st.number_input(
-                    "PDF page",
-                    min_value=1,
-                    step=1,
-                    key="pdf_page_selector",
-                )
-                render_pdf_preview(current_doc.get("pdf"), page=int(selected_page))  # type: ignore[arg-type]
+                pdf_asset = current_doc.get("pdf")
+                page_count = get_pdf_page_count(pdf_asset) if pdf_asset else None
+                current_page = max(1, int(st.session_state.get("pdf_page_selector", 1)))
+                if page_count:
+                    current_page = min(current_page, page_count)
+                st.session_state["pdf_page_selector"] = current_page
+
+                render_pdf_preview(pdf_asset, height=preview_height, page=current_page)  # type: ignore[arg-type]
+
+                nav_prev_col, nav_mid_col, nav_next_col = st.columns([1, 2, 1], gap="small")
+                with nav_prev_col:
+                    prev_clicked = st.button("←", key="pdf_prev_page", width="stretch")
+                with nav_mid_col:
+                    total_text = f" / {page_count}" if page_count else ""
+                    st.markdown(f"**Page {current_page}{total_text}**")
+                with nav_next_col:
+                    next_clicked = st.button("→", key="pdf_next_page", width="stretch")
+
+                target_page = current_page
+                if prev_clicked and current_page > 1:
+                    target_page -= 1
+                if next_clicked and (page_count is None or current_page < page_count):
+                    target_page += 1
+                if target_page != current_page:
+                    st.session_state["pdf_page_selector"] = target_page
+                    st.rerun()
+
                 source_focus_kind = "page"
-                source_focus_index = int(selected_page)
+                source_focus_index = current_page
             else:
                 source_focus_kind = "slide"
                 source_focus_index, source_slide_text, slide_changed = render_pptx_preview(current_doc.get("pptx"))  # type: ignore[arg-type]
@@ -395,7 +435,7 @@ def main() -> None:
             st.radio("Source mode", options=source_modes, horizontal=True, key="source_mode_selector")
 
     sync_slides_enabled = bool(st.session_state.get("sync_slides", True))
-    apply_sync = sync_slides_enabled and source_mode_selected == "PPTX"
+    apply_sync = sync_slides_enabled and source_mode_selected in {"PPTX", "PDF"}
 
     synced_blocks: list[BlockRecord] = []
     synced_page_value: int | None = None
@@ -437,7 +477,6 @@ def main() -> None:
             st.warning(f"{selected_view} view is unavailable; showing {available_views[0]} instead.")
             selected_view = available_views[0]
 
-        preview_height = 780
         if not available_views:
             st.info("No Docling outputs loaded (.html, .md, .json).")
         elif selected_view == "HTML":
@@ -462,10 +501,18 @@ def main() -> None:
                 label = (
                     f"{idx}. p{hit.page or '-'} | {hit.label or 'block'} | {hit.snippet}"
                 )
-                if st.button(label, key=f"search_hit_{idx}", use_container_width=True):
+                if st.button(label, key=f"search_hit_{idx}", width="stretch"):
                     target_page = _extract_int(hit.page)
-                    if target_page is not None and current_doc.get("pptx"):
-                        st.session_state["pending_nav_slide"] = target_page
+                    if target_page is not None:
+                        if source_mode_selected == "PDF" and current_doc.get("pdf"):
+                            st.session_state["source_mode_selector"] = "PDF"
+                            st.session_state["pdf_page_selector"] = max(1, target_page)
+                        elif current_doc.get("pptx"):
+                            st.session_state["source_mode_selector"] = "PPTX"
+                            st.session_state["pending_nav_slide"] = target_page
+                        elif current_doc.get("pdf"):
+                            st.session_state["source_mode_selector"] = "PDF"
+                            st.session_state["pdf_page_selector"] = max(1, target_page)
                     if current_doc.get("md"):
                         st.session_state["view_mode"] = "Markdown"
                     st.session_state["search_focus_text"] = (hit.text or hit.snippet or "").strip()
@@ -504,10 +551,16 @@ def main() -> None:
                     f"(page={synced_block.page or '-'})"
                 )
         else:
-            st.caption(
-                f"No JSON block matched {source_focus_kind} {source_focus_index}; "
-                "using slide title/text fallback for right-side focus."
-            )
+            if source_mode_selected == "PPTX":
+                st.caption(
+                    f"No JSON block matched {source_focus_kind} {source_focus_index}; "
+                    "using slide title/text fallback for right-side focus."
+                )
+            else:
+                st.caption(
+                    f"No JSON block matched {source_focus_kind} {source_focus_index}; "
+                    "right-side focus is unavailable for this selection."
+                )
 
     with st.expander("Metadata and block inspection", expanded=False):
         meta_col, detail_col = st.columns([1.6, 1.0], gap="large")
@@ -533,7 +586,7 @@ def main() -> None:
 
                 filtered = filter_blocks(blocks, query=block_query, labels=label_filter, pages=page_filter)
                 st.caption(f"Showing {len(filtered)} of {len(blocks)} extracted blocks.")
-                st.dataframe(blocks_to_dataframe(filtered), hide_index=True, use_container_width=True, height=280)
+                st.dataframe(blocks_to_dataframe(filtered), hide_index=True, width="stretch", height=280)
 
                 if filtered:
                     option_ids = list(range(len(filtered)))
@@ -567,7 +620,7 @@ def main() -> None:
                     data=json.dumps(selected_block.raw, ensure_ascii=False, indent=2),
                     file_name=f"{selected_block.block_id}.json",
                     mime="application/json",
-                    use_container_width=True,
+                    width="stretch",
                 )
                 st.markdown("**Raw block JSON**")
                 st.json(selected_block.raw, expanded=False)
@@ -589,4 +642,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
